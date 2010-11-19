@@ -80,6 +80,7 @@ The following modules are included in this project:
 #endif
 
 
+
 //Create a UDP socket for receiving and sending data
 static UDP_SOCKET udpSocketUser = INVALID_UDP_SOCKET;
 
@@ -90,7 +91,10 @@ static UDP_SOCKET udpSocketUser = INVALID_UDP_SOCKET;
 static BYTE smUdp = SM_UDP_SEND_ARP;
 
 static void InitializeBoard(void);
+static void ServiceBoard(void);
+static void ServiceBoard1(void);
 
+static BYTE old_state;
 
 /////////////////////////////////////////////////
 //High Interrupt ISR
@@ -133,6 +137,8 @@ void main(void)
 {
     TICK8  tsecWait = 0;           //General purpose wait timer
     TICK16 tsecMsgSent = 0;        //Time last message was sent
+    TICK16 tsecBlinker = 0;  
+    
     char c;
     NODE_INFO udpServerNode;
 
@@ -176,6 +182,14 @@ void main(void)
      */
     while(1)
     {
+	    ServiceBoard();
+		if (TickGetSecDiff(tsecBlinker) >= (TICK16)1) 
+		{
+			tsecBlinker = TickGetSec();     //Update with current time
+			//Toggle system LED 
+            TRISB_RB6 = 0;
+            LATB6 ^= 1;
+		}
         switch (smUdp) {
         case SM_UDP_SEND_ARP:
             if (ARPIsTxReady()) {
@@ -235,7 +249,120 @@ void main(void)
     }
 }
 
+//Relays
+#define MXD2R_RLY1   LATB4
+#define MXD2R_RLY2   LATB5
 
+#define TRIS_RLY1  TRISB_RB4
+#define TRIS_RLY2  TRISB_RB5
+
+#define MXD2R_I1    PORTA_RA0
+#define MXD2R_I2    PORTA_RA1
+#define MXD2R_I3    PORTA_RA2
+#define MXD2R_O1    LATA0
+#define MXD2R_O2    LATA1
+#define MXD2R_O3    LATA2
+#define MXD2R_O4    LATC2
+#define MXD2R_O5    LATC1
+#define MXD2R_O6    LATC0
+
+//I/O port direction
+#define MXD2R_IO1_DIR   TRISA_RA0
+#define MXD2R_IO2_DIR   TRISA_RA1
+#define MXD2R_IO3_DIR   TRISA_RA2
+
+//Defines used in evtLatchExIn and evtLatchExInUpdt variables
+#define IO1_LAT_MASK    0x0001ul
+#define IO2_LAT_MASK    0x0002ul
+#define IO3_LAT_MASK    0x0004ul
+
+void mxd2rInit(void)
+{
+    //BYTE i;
+    
+    //Relay ports are outputs
+    TRIS_RLY1 = 0;
+    TRIS_RLY2 = 0;
+
+    //IO variables
+    old_state = 0;
+
+	MXD2R_RLY1 = 0;
+	MXD2R_RLY2 = 0;
+
+	
+}
+
+void stateToRly(BYTE i)
+{
+	if (i&0x01) { 
+		MXD2R_RLY1 = 1;
+		MXD2R_O6 = 1;
+	}
+	else {
+		MXD2R_RLY1 = 0;
+		MXD2R_O6 = 0;
+	}
+	if (i&0x04) {
+		MXD2R_RLY2 = 1;
+		MXD2R_O5 = 1;
+	}
+	else {
+		MXD2R_RLY2 = 0;
+		MXD2R_O5 = 0;
+	}
+	//MXD2R_RLY1 = !!(i & 0x01);
+	//MXD2R_RLY2 = !!(i & 0x04);
+}
+
+BYTE decider(BYTE i)
+{
+    if (i & 0x04)
+	  return 0x04;
+	if (i & 0x01)
+	  return 0x01;
+	return 0x00;
+}
+void ppp(BYTE i) 
+{
+	BYTE next_state=old_state;
+	if ((old_state == 0) && (i != 0)) // something turned on
+	{
+		next_state = decider(i);		
+	} 
+	if ((old_state & i) != old_state) // same as last time?
+	{
+		next_state = decider(i);
+	}
+	old_state = next_state;
+    stateToRly(old_state);
+}
+
+static void ServiceBoard(void) 
+{
+	BYTE input_value;
+	input_value = PORTF ; // invert inputs -- use active LOW
+	input_value = (input_value & 0x05) ^ 0x05;
+	TRISB_RB6 = 0;
+    if ((input_value & 0x01)==0 && (input_value & 0x04)==0) // 
+	   LATB6 = 0;
+	else
+	   LATB6 = 1;
+	
+	ppp(input_value);
+}
+static void ServiceBoard1(void)
+{
+    //PORTA = 0x00;
+	TRISA = 0xFC;
+	
+	// set relays as outputs
+	TRIS_RLY1 = 0;
+	TRIS_RLY2 = 0;
+	
+	MXD2R_RLY1 = PORTF_RF0 ? 0 : 1;
+	MXD2R_RLY2 = PORTF_RF2 ? 0 : 1;
+}
 /**
  * Initialize the boards hardware
  */
@@ -265,6 +392,12 @@ static void InitializeBoard(void)
 
     /////////////////////////////////////////////////
     //Initialize ports    
+		
+	// Not a/d function
+	ADCON1 = 0x0F; // disable all a/d
+	ADCON0 = 0x00; // no analog input
+
+	PORTA = 0x00; // clear it.
     TRISA = 0b11111111; //All inputs
 
     //Ensure port TRISB 0 is always an inputs when NIC INT0 is enabled:
@@ -280,7 +413,7 @@ static void InitializeBoard(void)
     //C4 = Is controlled by I2C unit
     //C6 = Is controlled by USART
     //C7 = Is controlled by USART
-    TRISC = 0b11111111 | 0xd8;
+    TRISC = 0b10011000 | 0xd8;
 
     //Set PORT G and F direction bits
     TRISF = 0b11111111; //All inputs
@@ -297,4 +430,8 @@ static void InitializeBoard(void)
     T0CON = 0;
     INTCON_GIEH = 1;
     INTCON_GIEL = 1;
+
+	mxd2rInit();
+
 }
+
