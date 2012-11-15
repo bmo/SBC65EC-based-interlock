@@ -95,6 +95,7 @@ static void ServiceBoard(void);
 static void ServiceBoard1(void);
 
 static BYTE old_state;
+static BYTE old_inputs;
 
 /////////////////////////////////////////////////
 //High Interrupt ISR
@@ -138,7 +139,8 @@ void main(void)
     TICK8  tsecWait = 0;           //General purpose wait timer
     TICK16 tsecMsgSent = 0;        //Time last message was sent
     TICK16 tsecBlinker = 0;  
-    
+    BYTE main_state;				// what are the inputs
+	BYTE main_inputs;				// who has the transmit
     char c;
     NODE_INFO udpServerNode;
 
@@ -161,11 +163,13 @@ void main(void)
     //Initialize remote IP and address with 10.1.0.101. The MAC address is
     //is not intialized yet, but after we receive an ARP responce.
     //Configure for local port 54123 and remote port 54124.
-    udpServerNode.IPAddr.v[0] = 10;
-    udpServerNode.IPAddr.v[1] = 1;
-    udpServerNode.IPAddr.v[2] = 0;
-    udpServerNode.IPAddr.v[3] = 101;
+    udpServerNode.IPAddr.v[0] = 255;
+    udpServerNode.IPAddr.v[1] = 255;
+    udpServerNode.IPAddr.v[2] = 255;
+    udpServerNode.IPAddr.v[3] = 255;
     udpSocketUser = UDPOpen(54123, &udpServerNode, 54124);
+	//udpSocketUser = UDPOpen(54123, NULL, 54124);
+	smUdp = SM_UDP_RESOLVED;
     
     //An error occurred during the UDPOpen() function
     if (udpSocketUser == INVALID_UDP_SOCKET) {
@@ -187,8 +191,10 @@ void main(void)
 		{
 			tsecBlinker = TickGetSec();     //Update with current time
 			//Toggle system LED 
+#ifdef BLINKTIME
             TRISB_RB6 = 0;
             LATB6 ^= 1;
+#endif
 		}
         switch (smUdp) {
         case SM_UDP_SEND_ARP:
@@ -215,25 +221,30 @@ void main(void)
             }
             break;
         case SM_UDP_RESOLVED:
-            if ( !PORTB_RB0) {
+            if ( 1 || !PORTB_RB0) {
                 //Send a message every second for as long as PIC port pin B0 is = 0
-                if (TickGetSecDiff(tsecMsgSent) >= (TICK16)1) {
+                if ((TickGetSecDiff(tsecMsgSent) >= (TICK16)1) ||
+					((main_state != old_state) || (main_inputs != old_inputs))) {
                     //Checks if there is a transmit buffer ready for accepting data, and that the given socket
                     //is valid (not equal to INVALID_UDP_SOCKET for example)
                     if (UDPIsPutReady(udpSocketUser)) {
                         tsecMsgSent = TickGetSec();     //Update with current time
 
                         //Send a UDP Datagram with one byte only indicating the status We are only interrested in the first byte of the message.
-                        UDPPut(1);
-
+                        UDPPut('H');UDPPut('E');UDPPut('L');UDPPut('L');UDPPut('O');
+						UDPPut(old_state);
+						UDPPut(old_inputs);
+						main_state = old_state;
+						main_inputs = old_inputs;
                         //Send contents of transmit buffer, and free buffer
                         UDPFlush();
-                        
+                       	
+						//Toggle system LED each time a message is sent
+                    	TRISB_RB6 = 0;
+                    	LATB6 ^= 1; 
                     }
 
-                    //Toggle system LED each time a message is sent
-                    TRISB_RB6 = 0;
-                    LATB6 ^= 1;
+                    
                 }
             }
             break;
@@ -252,9 +263,11 @@ void main(void)
 //Relays
 #define MXD2R_RLY1   LATB4
 #define MXD2R_RLY2   LATB5
+#define MXD2R_RLY3	 LATC2
 
 #define TRIS_RLY1  TRISB_RB4
 #define TRIS_RLY2  TRISB_RB5
+#define TRIS_RLY3  TRISC_RC2
 
 #define MXD2R_I1    PORTA_RA0
 #define MXD2R_I2    PORTA_RA1
@@ -283,34 +296,49 @@ void mxd2rInit(void)
     //Relay ports are outputs
     TRIS_RLY1 = 0;
     TRIS_RLY2 = 0;
+	TRIS_RLY3 = 0;
 
     //IO variables
     old_state = 0;
+	old_inputs = 0;
 
 	MXD2R_RLY1 = 0;
 	MXD2R_RLY2 = 0;
+	MXD2R_RLY3 = 0;
 
 	
 }
 
 void stateToRly(BYTE i)
 {
-	if (i&0x01) { 
-		MXD2R_RLY1 = 1;
-		MXD2R_O6 = 1;
-	}
-	else {
+	if (i == 0) {
 		MXD2R_RLY1 = 0;
-		MXD2R_O6 = 0;
-	}
-	if (i&0x04) {
-		MXD2R_RLY2 = 1;
-		MXD2R_O5 = 1;
-	}
-	else {
 		MXD2R_RLY2 = 0;
+		MXD2R_RLY3 = 0;
+		MXD2R_O6 = 0;
 		MXD2R_O5 = 0;
+		MXD2R_O4 = 0;
 	}
+	if (i&0x01) { 
+		MXD2R_RLY1 = 1; MXD2R_RLY2 = 0; MXD2R_RLY3 = 0;
+		MXD2R_O6 = 1; MXD2R_O5 = 0;
+		//MXD2R_O4 = 1;
+	}
+	
+	if (i&0x04) {
+		MXD2R_RLY2 = 1; MXD2R_RLY1 = 0; MXD2R_RLY3 = 0;
+		MXD2R_O5 = 1; MXD2R_O6 = 0;
+		//MXD2R_O4 = 1;
+	}
+	
+//
+	if (i&0x10) {
+		MXD2R_RLY3 = 1;MXD2R_RLY1 = 0; MXD2R_RLY2 = 0;
+		MXD2R_O5 = 0; 
+		MXD2R_O6 = 0 ; // 
+	}
+	
+
 	//MXD2R_RLY1 = !!(i & 0x01);
 	//MXD2R_RLY2 = !!(i & 0x04);
 }
@@ -321,20 +349,23 @@ BYTE decider(BYTE i)
 	  return 0x04;
 	if (i & 0x01)
 	  return 0x01;
+	if (i & 0x10)
+	  return 0x10;
 	return 0x00;
 }
 void ppp(BYTE i) 
 {
 	BYTE next_state=old_state;
-	if ((old_state == 0) && (i != 0)) // something turned on
+	if ((old_state == 0) && (old_inputs == 0) && (i != 0)) // something turned on, but make sure previous state was all off
 	{
 		next_state = decider(i);		
 	} 
-	if ((old_state & i) != old_state) // same as last time?
+	if ((old_state & i) == 0) // turn off...
 	{
 		next_state = decider(i);
 	}
 	old_state = next_state;
+	old_inputs = i;
     stateToRly(old_state);
 }
 
@@ -342,12 +373,13 @@ static void ServiceBoard(void)
 {
 	BYTE input_value;
 	input_value = PORTF ; // invert inputs -- use active LOW
-	input_value = (input_value & 0x05) ^ 0x05;
+	input_value = (input_value & 0x15) ^ 0x15;
 	TRISB_RB6 = 0;
-    if ((input_value & 0x01)==0 && (input_value & 0x04)==0) // 
-	   LATB6 = 0;
-	else
-	   LATB6 = 1;
+    //if ((input_value & 0x01)==0 && (input_value & 0x04)==0) //
+    //if (input_value==0) 
+	//   LATB6 = 0;
+	//else
+	//   LATB6 = 1;
 	
 	ppp(input_value);
 }

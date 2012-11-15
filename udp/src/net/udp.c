@@ -100,6 +100,7 @@ typedef struct _PSEUDO_HEADER
 
 UDP_SOCKET_INFO  UDPSocketInfo[MAX_UDP_SOCKETS];
 UDP_SOCKET activeUDPSocket;
+DWORD udpChecksum; // only have one going at a time
 
 static UDP_SOCKET FindMatchingSocket(UDP_HEADER *h, NODE_INFO *remoteNode,
                                     IP_ADDR *destIP);
@@ -271,13 +272,18 @@ BOOL UDPPut(BYTE v)
         //We give the size of the UDP header here as a parameter. This causes the current
         //write pointer to be set to firt byte after the UDP header, which is the UDP data area.
         IPSetTxBuffer(p->TxBuffer, sizeof(UDP_HEADER));
-
+	    udpChecksum = 0;
         //p->TxOffset = 0;  /* TxOffset is not required! */
     }
 
     //Load it.
     MACPut(v);
-
+	if (p->TxCount & 1) {
+		udpChecksum += v;
+		} else
+		{
+		udpChecksum += ((WORD)v << 8);
+		}
     //Keep track of number of bytes loaded.
     //If total bytes fill up buffer, transmit it.
     p->TxCount++;
@@ -285,6 +291,7 @@ BOOL UDPPut(BYTE v)
     if ( p->TxCount >= UDPGetMaxDataLength() )
     {
         UDPFlush();
+		udpChecksum = 0;
     }
     
     return TRUE;
@@ -325,7 +332,7 @@ WORD UDPPutArray(BYTE *buffer, WORD count)
 {
     UDP_SOCKET_INFO *p;
     WORD temp;
-
+	WORD ckCount = 0;
     p = &UDPSocketInfo[activeUDPSocket];
 
     //This UDP Socket does not contain any unsent data, and currently does not own a TX Buffer!
@@ -355,6 +362,16 @@ WORD UDPPutArray(BYTE *buffer, WORD count)
 
     //Write buffer
     MACPutArray(buffer, count);
+	while (ckCount <= count) {
+		if (p->TxCount+ckCount & 1) {
+			udpChecksum += *(buffer+ckCount);
+			} else
+		{
+			udpChecksum += ((WORD)*(buffer+ckCount) << 8);
+		}
+		ckCount++;
+	}	
+	
 
     //Keep track of number of bytes loaded.
     //If total bytes fill up buffer, transmit it.
@@ -384,7 +401,8 @@ void UDPFlush(void)
 {
     UDP_HEADER      h;
     UDP_SOCKET_INFO *p;
-
+    WORD csLength;
+	DWORD_VAL csChecksum;
     // Wait for TX hardware to become available (finish transmitting 
     // any previous packet)
     while( !IPIsTxReady(TRUE) ) FAST_USER_PROCESS();
@@ -406,6 +424,8 @@ void UDPFlush(void)
                  IP_PROT_UDP,
                  h.Length.Val );
 
+    // save length before swap for checksum calculation
+    csLength			= p->TxCount;
 
     //Now swap h.Length.Val
     h.Length.Val        = swaps(h.Length.Val);
@@ -414,7 +434,51 @@ void UDPFlush(void)
     IPPutArray((BYTE*)&h, sizeof(h));
 
     //Update checksum. !!!!!!!!!!!!!!! TO BE IMPLEMENTED !!!!!!!!!!!!!!!!!!!
+	// Update checksum.
+    
+	// start the checksum with value for UDP protocol & length from pseudo header (and in the actual packet)
+	csChecksum.Val = (WORD)IP_PROT_UDP + (WORD)csLength + sizeof(UDP_HEADER);
+	// add in my address and the remoteNode address
+	csChecksum.Val += ((WORD)MY_IP_BYTE1 << 8) + MY_IP_BYTE2;
+	csChecksum.Val += ((WORD)MY_IP_BYTE3 << 8) + MY_IP_BYTE4;
+	csChecksum.Val += ((WORD)p->remoteNode.IPAddr.v[0] << 8) +  ((WORD)p->remoteNode.IPAddr.v[1] ) +
+					  ((WORD)p->remoteNode.IPAddr.v[2] << 8) +  ((WORD)p->remoteNode.IPAddr.v[3] );
+			
 
+    // set mac pointer to the ip_addr of the source, so all of pseudo header but length is included.
+    // length of pseudo header is already included in previous instruction.
+    //MACSetRxBuffer( sizeof(IP_HEADER)+sizeof(UDP_HEADER) );
+	
+
+	csChecksum.Val += (WORD)p->localPort;
+	csChecksum.Val += (WORD)p->remotePort;
+	csChecksum.Val += (WORD)csLength + sizeof(UDP_HEADER);
+
+	//IPSetRxBuffer(BASE_TX_ADDR + sizeof(ETHER_HEADER) + sizeof(IP_HEADER) - ( sizeof(IP_ADDR) * 2 ) );
+	
+    // handled in UdpPut routines
+	csChecksum.Val += udpChecksum;
+
+	// add any carry over to the last word
+	while((DWORD)csChecksum.word.MSW) {
+		csChecksum.Val = (DWORD)csChecksum.word.LSW + (DWORD)csChecksum.word.MSW;
+	}	
+	// add any carry over from adding the carry over
+	//csChecksum.Val = (DWORD)csChecksum.word.LSW + (DWORD)csChecksum.word.MSW;
+	
+	// invert
+	csChecksum.Val = ~csChecksum.Val;
+	
+	// set write pointer to location of checksum in packet
+	//MACSetWritePtr( sizeof(ETHER_HEADER) + sizeof(IP_HEADER) + sizeof(UDP_HEADER) - 2 );
+	IPSetTxBuffer(p->TxBuffer,   sizeof(UDP_HEADER) - 2);
+	// write the swapped checksum to the packet
+	
+	
+	//MACPut(	csChecksum.v[1] );
+	//MACPut(	csChecksum.v[0] );
+	MACPut(0);
+	MACPut(0);
     //Send data contained in TX Buffer via MAC
     MACFlush();
 

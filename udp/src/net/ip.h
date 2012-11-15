@@ -109,6 +109,7 @@ For details on configuring this module, see @ref ip_conf section of ip.h file.
 typedef union _IP_ADDR
 {
     BYTE        v[4];
+	WORD		w[2];
     DWORD       Val;
 } IP_ADDR;
 
